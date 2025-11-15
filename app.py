@@ -261,9 +261,10 @@ def extract_totale_imponibile(text):
         # IVA — Totale imponibile — Totale imposta
         if len(nums) == 3:
             iva, imponibile, imposta = nums
-            return imponibile  # <-- questo è sempre corretto
+            return imponibile 
+    # Se arriva qui → NON trovato
+    return "CONSULTARE FILE"
 
-    return ""
 
 
 
