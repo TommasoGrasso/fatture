@@ -9,7 +9,6 @@ app = Flask(__name__)
 
 
 # ---------- FUNZIONI DI ESTRAZIONE DAI PDF ----------
-
 def extract_text_from_pdf(file_storage):
     """
     Legge tutto il testo di un PDF caricato (FileStorage di Flask)
@@ -41,7 +40,6 @@ def extract_doc_number_and_date(text):
         return numero_con_prefisso, data_doc
 
     return "", ""
-
 
 
 def extract_po(text):
@@ -187,37 +185,65 @@ def extract_ddt_and_date(text):
 
     return ddt_final, date_final
 
+""" PIU RIGHE PER PIU DDT """
+def explode_ddt_rows(df):
+    rows = []
+
+    for _, row in df.iterrows():
+        ddt_list = row["DDT"]
+        date_list = row["Data DDT"]
+
+        # se non ci sono DDT → una sola riga
+        if not ddt_list:
+            rows.append(row)
+            continue
+
+        # altrimenti crea tante righe quanti sono i DDT
+        for ddt, ddt_date in zip(ddt_list, date_list):
+            new_row = row.copy()
+            new_row["DDT"] = ddt
+            new_row["Data DDT"] = ddt_date
+            rows.append(new_row)
+
+    return pd.DataFrame(rows)
 
 
-""" PROBLEMA NON CALCOLA LA QUANTITA CORRETTA """
 def extract_total_quantity(text):
     """
-    Somma le quantità trovate nelle righe articolo.
-    Funziona per:
-    - AUTRY (Paia)
-    - CHANTELLE (PZ)
-    - SEB (note di credito)
-    - righe spezzate
+    Estrae TUTTE le quantità reali dagli articoli in fattura.
+    Riconosce le quantità dalla struttura della riga e filtra prezzi, IVA, totali.
     """
 
-    total = 0.0
-    units = [" PZ", " Paia", " NR "]
+    quantities = []
     lines = text.splitlines()
 
     for line in lines:
-        if any(unit in line for unit in units):
-            # prendi tutto ciò che sta prima dell'unità
-            unit_pos = min((line.find(u) for u in units if u in line))
+        line = line.strip()
 
-            before_unit = line[:unit_pos]
+        # ignora righe che NON possono contenere quantità
+        if not any(um in line.lower() for um in ["pz", "paia", "nr"]):
+            continue
 
-            # trova il primo numero (formato italiano)
-            m = re.search(r"(\d{1,3}(?:\.\d{3})*,\d+|\d+)", before_unit)
-            if m:
-                q = parse_number_it(m.group(1))
-                total += q
+        # estrai tutti i numeri con virgola EN o IT
+        nums = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", line)  # es: 12,00 - 1.500,00
 
-    return int(round(total))
+        # se non trova numeri, salta
+        if not nums:
+            continue
+
+        # la quantità è SEMPRE il PRIMO numero nella riga articoli
+        quant_str = nums[0]
+
+        # parse quantità
+        quant = parse_number_it(quant_str)
+
+        # quantità deve essere intera (arrotondiamo)
+        if quant > 0:
+            quantities.append(int(round(quant)))
+
+    # ritorna la somma totale
+    return sum(quantities)
+
 
 
 
@@ -264,31 +290,6 @@ def extract_totale_imponibile(text):
             return imponibile 
     # Se arriva qui → NON trovato
     return "CONSULTARE FILE"
-
-
-
-
-""" PIU RIGHE PER PIU DDT """
-def explode_ddt_rows(df):
-    rows = []
-
-    for _, row in df.iterrows():
-        ddt_list = row["DDT"]
-        date_list = row["Data DDT"]
-
-        # se non ci sono DDT → una sola riga
-        if not ddt_list:
-            rows.append(row)
-            continue
-
-        # altrimenti crea tante righe quanti sono i DDT
-        for ddt, ddt_date in zip(ddt_list, date_list):
-            new_row = row.copy()
-            new_row["DDT"] = ddt
-            new_row["Data DDT"] = ddt_date
-            rows.append(new_row)
-
-    return pd.DataFrame(rows)
 
 
 def parse_invoice_from_pdf(file_storage):
