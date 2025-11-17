@@ -207,46 +207,6 @@ def explode_ddt_rows(df):
 
     return pd.DataFrame(rows)
 
-
-def extract_total_quantity(text):
-    """
-    Estrae TUTTE le quantità reali dagli articoli in fattura.
-    Riconosce le quantità dalla struttura della riga e filtra prezzi, IVA, totali.
-    """
-
-    quantities = []
-    lines = text.splitlines()
-
-    for line in lines:
-        line = line.strip()
-
-        # ignora righe che NON possono contenere quantità
-        if not any(um in line.lower() for um in ["pz", "paia", "nr"]):
-            continue
-
-        # estrai tutti i numeri con virgola EN o IT
-        nums = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", line)  # es: 12,00 - 1.500,00
-
-        # se non trova numeri, salta
-        if not nums:
-            continue
-
-        # la quantità è SEMPRE il PRIMO numero nella riga articoli
-        quant_str = nums[0]
-
-        # parse quantità
-        quant = parse_number_it(quant_str)
-
-        # quantità deve essere intera (arrotondiamo)
-        if quant > 0:
-            quantities.append(int(round(quant)))
-
-    # ritorna la somma totale
-    return sum(quantities)
-
-
-
-
 def parse_number_it(s):
     """
     Converte una stringa numero in formato italiano:
@@ -289,8 +249,110 @@ def extract_totale_imponibile(text):
             iva, imponibile, imposta = nums
             return imponibile 
     # Se arriva qui → NON trovato
-    return "CONSULTARE FILE"
+    return "CONSULTARE DOCUMENTO"
 
+def extract_total_quantity(file_storage):
+    """
+    Prova prima con estrazione tabellare.
+    Se non trova quantità valide, usa il metodo originale con coordinate.
+    """
+    total_from_tables = extract_quantity_from_tables(file_storage)
+
+    if total_from_tables > 0:
+        return int(total_from_tables)
+
+    # Se le tabelle non hanno dato quantità, usa metodo originale
+    return extract_quantity_by_coordinates(file_storage)
+
+
+def extract_quantity_from_tables(file_storage):
+    """
+    Estrazione tramite tabelle (funziona per i casi con quantità=1)
+    """
+    quantita_tot = 0
+
+    with pdfplumber.open(file_storage) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+
+            for table in tables:
+                if not table:
+                    continue
+
+                header = table[0]
+                quantita_idx = None
+
+                # Cerca colonna "Quantità"
+                for idx, cell in enumerate(header):
+                    if cell and "Quantit" in cell:
+                        quantita_idx = idx
+                        break
+
+                if quantita_idx is None:
+                    continue
+
+                for row in table[1:]:
+                    if quantita_idx < len(row):
+                        cell = row[quantita_idx]
+                        if not cell:
+                            continue
+
+                        val = cell.strip().replace(" ", "")
+
+                        # Formato tipo "1,00"
+                        if re.fullmatch(r"\d+(?:,\d{2})?", val):
+                            try:
+                                quantita_tot += float(val.replace(",", "."))
+                            except:
+                                pass
+
+    return quantita_tot
+
+
+def extract_quantity_by_coordinates(file_storage):
+    """
+    Il tuo metodo originale che funziona per quasi tutti i file.
+    """
+    quantita_tot = 0
+    COL_MIN = 250
+    COL_MAX = 300
+    TOLERANCE_Y = 3
+
+    with pdfplumber.open(file_storage) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            col_words = [w for w in words if COL_MIN <= w['x0'] <= COL_MAX]
+            col_words.sort(key=lambda w: (round(w['top'] / TOLERANCE_Y), w['x0']))
+
+            lines = []
+            current_line = []
+            last_y = None
+
+            for word in col_words:
+                current_y = round(word['top'] / TOLERANCE_Y)
+
+                if last_y is None or current_y == last_y:
+                    current_line.append(word['text'])
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    current_line = [word['text']]
+
+                last_y = current_y
+
+            if current_line:
+                lines.append(' '.join(current_line))
+
+            # Estrazione numeri originale
+            for line in lines:
+                line_no_spaces = line.replace(" ", "")
+                if re.fullmatch(r"\d{1,6}|\d{1,3}(?:\.\d{3})*|\d{1,3}(?:\.\d{3})*,\d{2}", line_no_spaces):
+                    try:
+                        quantita_tot += float(line_no_spaces.replace(".", "").replace(",", "."))
+                    except:
+                        pass
+
+    return quantita_tot
 
 def parse_invoice_from_pdf(file_storage):
     """
@@ -304,7 +366,7 @@ def parse_invoice_from_pdf(file_storage):
     #ddt, data_ddt = extract_ddt_and_date(text) 
     ddt_list, date_list = extract_ddt_and_date(text)
     totale_imponibile = extract_totale_imponibile(text)
-    quantita = extract_total_quantity(text)
+    quantita = extract_total_quantity(file_storage)
 
     return {
         "Numero documento": num_doc,
@@ -341,9 +403,32 @@ def upload():
 
     df = pd.DataFrame(rows)
 
-    # 👉 SOLUZIONE 4: una riga per ogni DDT
+    # 👉 UNA RIGA PER OGNI DDT
     df = explode_ddt_rows(df)
 
+    # 👉 PLACEHOLDERS PER CELLE VUOTE (come richiesto)
+    df["Numero documento"] = df["Numero documento"].replace("", "MANCANTE_NUM_DOC")
+    df["Data documento"] = df["Data documento"].replace("", "MANCANTE_DATA_DOC")
+    df["PO"] = df["PO"].replace("", "MANCANTE_PO")
+
+    # DDT e Data DDT possono essere liste → le normalizziamo
+    df["DDT"] = df["DDT"].apply(
+        lambda x: x if x not in ["", None, [], {}] else "MANCANTE_DDT"
+    )
+    df["Data DDT"] = df["Data DDT"].apply(
+        lambda x: x if x not in ["", None, [], {}] else "MANCANTE_DATA_DDT"
+    )
+
+    df["Totale Imponibile"] = df["Totale Imponibile"].replace(
+        "", "MANCANTE_IMPONIBILE"
+    )
+
+    # Quantità: se è None o "", usa placeholder
+    df["Quantità"] = df["Quantità"].apply(
+        lambda x: x if x not in ["", None] else "MANCANTE_QTA"
+    )
+
+    # 👉 CREA L’EXCEL
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Dati")
@@ -356,6 +441,7 @@ def upload():
         download_name="fatture_estratte.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
 
 
 
